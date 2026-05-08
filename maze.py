@@ -6,6 +6,8 @@ from collections import deque
 BG = (12, 14, 23)
 WALL = (210, 215, 235)
 CELL_UNVIS = (20, 23, 36)
+CELL_VIS = (30, 35, 55)
+MOUSE_COL = (255, 200, 50)
 FRONTIER = (45, 85, 195)
 PATH_COL = (45, 215, 100)
 START_COL = (35, 200, 80)
@@ -16,7 +18,9 @@ WIN_W, WIN_H = 512, 512
 ROWS = 12
 COLS = 12
 
-SOLVE_DELAY = 6  # ms per BFS step
+# ms per animation step for each phase
+GEN_DELAY = 12
+SOLVE_DELAY = 6
 
 
 class Maze:
@@ -31,7 +35,6 @@ class Maze:
         self.end = None
 
     def remove_wall(self, r1, c1, r2, c2):
-        # Open the shared wall between two adjacent cells.
         dr, dc = r2 - r1, c2 - c1
         if dr == -1:
             self.northWall[r1][c1] = 0
@@ -60,13 +63,13 @@ class Maze:
 
 
 def gen_steps(maze):
-    # Generate a full maze instantly (no animation).
     R, C = maze.R, maze.C
     visited = [[False] * C for _ in range(R)]
     dirs = list(maze.DIRS)
     sr, sc = random.randrange(R), random.randrange(C)
     visited[sr][sc] = True
     stack = [(sr, sc)]
+    yield ("step", sr, sc, frozenset(stack))
     while stack:
         r, c = stack[-1]
         nbrs = [
@@ -79,12 +82,15 @@ def gen_steps(maze):
             maze.remove_wall(r, c, nr, nc)
             visited[nr][nc] = True
             stack.append((nr, nc))
+            yield ("step", nr, nc, frozenset(stack))
         else:
             stack.pop()
+            if stack:
+                yield ("step", stack[-1][0], stack[-1][1], frozenset(stack))
+    yield ("done",)
 
 
 def solve_steps(maze):
-    # BFS solver that yields visited cells and final path.
     sr, sc = maze.start
     er, ec = maze.end
     R, C = maze.R, maze.C
@@ -119,8 +125,10 @@ class View:
         self.cs = max(8, min(avail_w // C, avail_h // R))
         self.ox = (WIN_W - C * self.cs) // 2
         self.oy = (WIN_H - R * self.cs) // 2
+
         self.frontier = set()
         self.path_set = set()
+        self.mouse = None
 
     def cell_rect(self, r, c):
         cs = self.cs
@@ -128,24 +136,30 @@ class View:
         y = self.oy + (self.maze.R - 1 - r) * cs
         return pygame.Rect(x, y, cs, cs)
 
+    def cell_color(self, r, c, phase):
+        if phase == "generating":
+            if self.mouse == (r, c):
+                return MOUSE_COL
+            return CELL_UNVIS
+        if phase in ("solving", "solved"):
+            if (r, c) in self.path_set:
+                return PATH_COL
+            if (r, c) in self.frontier:
+                return FRONTIER
+            return CELL_UNVIS
+        return CELL_UNVIS
+
     def draw_all(self, phase):
-        # Draw the maze and overlay frontier/path coloring.
         maze = self.maze
         R, C, cs = maze.R, maze.C, self.cs
         surf = self.surf
         surf.fill(BG)
-        wt = max(1, cs // 10)
+        wt = max(1, cs // 10)  # wall thickness scales with cell size
 
         for r in range(R):
             for c in range(C):
                 rect = self.cell_rect(r, c)
-                color = CELL_UNVIS
-                if phase in ("solving", "solved"):
-                    if (r, c) in self.path_set:
-                        color = PATH_COL
-                    elif (r, c) in self.frontier:
-                        color = FRONTIER
-                pygame.draw.rect(surf, color, rect)
+                pygame.draw.rect(surf, self.cell_color(r, c, phase), rect)
 
                 x, y = rect.x, rect.y
                 if maze.northWall[r + 1][c]:
@@ -158,9 +172,9 @@ class View:
                     pygame.draw.rect(surf, WALL, (x + cs, y, wt, cs + wt))
 
         if maze.start:
-            self._marker(*maze.start, START_COL)
+            self._marker(*maze.start, START_COL, "S")
         if maze.end:
-            self._marker(*maze.end, END_COL)
+            self._marker(*maze.end, END_COL, "E")
 
     def redraw_cell(self, r, c, phase):
         maze = self.maze
@@ -170,15 +184,11 @@ class View:
         x, y = rect.x, rect.y
         surf = self.surf
 
-        color = CELL_UNVIS
-        if phase in ("solving", "solved"):
-            if (r, c) in self.path_set:
-                color = PATH_COL
-            elif (r, c) in self.frontier:
-                color = FRONTIER
-        pygame.draw.rect(surf, color, rect)
+        pygame.draw.rect(surf, self.cell_color(r, c, phase), rect)
         if maze.northWall[r + 1][c]:
             pygame.draw.rect(surf, WALL, (x, y, cs + wt, wt))
+        else:
+            pygame.draw.rect(surf, self.cell_color(r, c, phase), (x, y, cs, wt))
         if maze.northWall[r][c]:
             pygame.draw.rect(surf, WALL, (x, y + cs, cs + wt, wt))
         if maze.eastWall[r][c]:
@@ -187,11 +197,11 @@ class View:
             pygame.draw.rect(surf, WALL, (x + cs, y, wt, cs + wt))
 
         if maze.start == (r, c):
-            self._marker(r, c, START_COL)
+            self._marker(r, c, START_COL, "S")
         if maze.end == (r, c):
-            self._marker(r, c, END_COL)
+            self._marker(r, c, END_COL, "E")
 
-    def _marker(self, r, c, color):
+    def _marker(self, r, c, color, letter):
         rect = self.cell_rect(r, c)
         cs = self.cs
         pad = max(2, cs // 6)
@@ -202,7 +212,7 @@ class View:
 def main():
     pygame.init()
     screen = pygame.display.set_mode((WIN_W, WIN_H))
-    pygame.display.set_caption("Maze Solver")
+    pygame.display.set_caption("Maze Generator & Solver")
     clock = pygame.time.Clock()
 
     def pump():
@@ -213,6 +223,14 @@ def main():
                 return False
         return True
 
+    def pause(ms):
+        start = pygame.time.get_ticks()
+        while pygame.time.get_ticks() - start < ms:
+            if not pump():
+                return False
+            clock.tick(60)
+        return True
+
     def shutdown():
         pygame.quit()
         sys.exit()
@@ -220,21 +238,59 @@ def main():
     random.seed()
 
     maze = Maze(ROWS, COLS)
-    gen_steps(maze)
-
-    maze.start = (ROWS - 1, 0)
-    maze.end = (0, COLS - 1)
-
     view = View(screen, maze)
     view.draw_all("grid")
     pygame.display.flip()
+    if not pause(200):
+        shutdown()
 
+    # Generating the maze
+    it = gen_steps(maze)
+    phase = "generating"
+    last_t = pygame.time.get_ticks()
+
+    while True:
+        if not pump():
+            shutdown()
+        now = pygame.time.get_ticks()
+        if now - last_t >= GEN_DELAY:
+            last_t = now
+            try:
+                step = next(it)
+            except StopIteration:
+                break
+
+            k = step[0]
+            if k == "step":
+                _, r, c, stk = step
+                old = view.mouse
+                view.mouse = (r, c)
+                if old and old != (r, c):
+                    view.redraw_cell(*old, phase)
+                view.redraw_cell(r, c, phase)
+            elif k == "done":
+                view.mouse = None
+                break
+
+        pygame.display.flip()
+        clock.tick(120)
+
+    # fixed start/end
+    # coordinates are drawn with inverted Y, so flip rows for visual corners
+    maze.start = (ROWS - 1, 0)
+    maze.end = (0, COLS - 1)
+
+    view.draw_all("gen_done")
+    pygame.display.flip()
+    if not pause(200):
+        shutdown()
+
+    # Solving the maze
     it = solve_steps(maze)
     phase = "solving"
     last_t = pygame.time.get_ticks()
 
     while True:
-        # Advance the BFS visualization.
         if not pump():
             shutdown()
         now = pygame.time.get_ticks()
@@ -261,9 +317,11 @@ def main():
         clock.tick(120)
 
     pygame.display.flip()
-    pygame.time.wait(1000)
-    shutdown()
+    if not pause(1000):
+        shutdown()
+
+    pygame.quit()
+    sys.exit()
 
 
-if __name__ == "__main__":
-    main()
+main()
